@@ -39,7 +39,7 @@ class SingleStockTradingEnv(gym.Env):
         )
 
         self.env_file_name = f"EvnOneStock_{datetime.now().strftime("%Y%m%d%H%M%S")}.csv"
-        pd.DataFrame(columns=["reward","terminated","truncated","portfolio_value","position","drawdown","current_step","prev_close","open_price","close_price","prev_position","delta_position"]).to_csv(self.env_file_name, index=False, header=True, mode="w")
+        pd.DataFrame(columns=["date","reward","terminated","truncated","portfolio_value","position","drawdown","current_step","prev_close","open_price","close_price","prev_position","delta_position"]).to_csv(self.env_file_name, index=False, header=True, mode="w")
         
         self._reset_internal_state()
 
@@ -75,6 +75,7 @@ class SingleStockTradingEnv(gym.Env):
         open_price = self.df.loc[self.current_step, "open"]
         close_price = self.df.loc[self.current_step, "close"]
         prev_close = self.df.loc[self.current_step-1, "close"]
+        op_date = self.df.loc[self.current_step, "date"]
 
         # ---------- 收益计算 ----------
         portfolio_return = 0.0
@@ -114,12 +115,13 @@ class SingleStockTradingEnv(gym.Env):
 
         # ---------- done ----------
         terminated = self.portfolio_value < 0.5 * self.initial_cash
-        truncated = self.current_step >= len(self.df)
+        truncated = self.current_step >= len(self.df)-1
 
         
 
         info = {
-            "reward":[reward],
+            "date":[op_date],
+            "reward":reward,
             "terminated":terminated,
             "truncated":truncated,
             "portfolio_value": self.portfolio_value,
