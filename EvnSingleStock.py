@@ -12,7 +12,8 @@ class StockTradingEnv(gym.Env):
     """
     metadata = {'render_modes': ['human']}
 
-    def __init__(self, df, lookback_n=20, initial_balance=1000000, mdd_penalty=2.0, red_line=-0.2):
+    def __init__(self, df, lookback_n=20, initial_balance=1000000, mdd_penalty=2.0, red_line=-0.2,
+                 evn_file="EvnSingleStock"):
         super(StockTradingEnv, self).__init__()
 
         # 1. 整理数据
@@ -41,11 +42,12 @@ class StockTradingEnv(gym.Env):
         self.net_worths = []
         self.max_net_worth = initial_balance
 
-        self.env_file_name = f"EvnSingleStock_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        self.env_file_name = f"./env_log/{evn_file}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         pd.DataFrame(
-            columns=['date', 'target_position', 'actual_position', 'adj_open', 'adj_close', 'adj_preclose', 'high',
-                     'low', 'limit_price', 'stop_price', 'tradestatuscode', 'daily_return', 'current_net_worth',
-                     'max_net_worth', 'mdd', 'total_return', 'reward', 'terminated', 'truncated', ]).to_csv(
+            columns=['date', 'target_position', 'actual_position', 'adj_old_position', 'adj_open', 'adj_close',
+                     'adj_preclose', 'high', 'low', 'limit_price', 'stop_price', 'tradestatuscode', 'daily_return',
+                     'current_net_worth', 'max_net_worth', 'mdd', 'total_return', 'reward', 'terminated',
+                     'truncated', ]).to_csv(
             self.env_file_name, index=False, header=True, mode="w")
 
     def reset(self, seed=None, options=None):
@@ -84,6 +86,9 @@ class StockTradingEnv(gym.Env):
         target_position = float(action[0])
 
         # 获取当前行情（第 current_step 行）
+        pre_row = self.df.iloc[self.current_step - 1]
+        pre_adj_close = pre_row['adj_close']
+        pre_adj_open = pre_row['adj_open']
         row = self.df.iloc[self.current_step]
         adj_open = row['adj_open']
         adj_close = row['adj_close']
@@ -117,12 +122,16 @@ class StockTradingEnv(gym.Env):
         else:
             actual_position = old_position
 
+        adj_old_position = (pre_adj_close / pre_adj_open * old_position) / (
+                pre_adj_close / pre_adj_open * old_position + 1 - old_position)
+
         # --- 收益计算逻辑 ---
         # 调仓日收益 = 旧仓位在(昨收-今开)的变动 + 新仓位在(今开-今收)的变动
-        pre_trade_ret = (adj_open / adj_preclose) - 1
-        post_trade_ret = (adj_close / adj_open) - 1
+        pre_trade_ret = (adj_open / adj_preclose)
+        post_trade_ret = (adj_close / adj_open)
 
-        daily_return = (pre_trade_ret * old_position) + (post_trade_ret * actual_position)
+        daily_return = (pre_trade_ret * adj_old_position + 1 - adj_old_position) * (
+                    post_trade_ret * actual_position + 1 - actual_position) - 1
 
         # 更新净值
         current_net_worth = self.net_worths[-1] * (1 + daily_return)
@@ -154,6 +163,7 @@ class StockTradingEnv(gym.Env):
             "date": [row['trade_date']],
             "target_position": target_position,
             "actual_position": actual_position,
+            'adj_old_position': adj_old_position,
             'adj_open': adj_open,
             'adj_close': adj_close,
             'adj_preclose': adj_preclose,
