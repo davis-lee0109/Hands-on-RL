@@ -12,7 +12,7 @@ class StockTradingEnv(gym.Env):
     """
     metadata = {'render_modes': ['human']}
 
-    def __init__(self, df, lookback_n=20, initial_balance=1000000, mdd_penalty=2.0, red_line=-0.2,
+    def __init__(self, df, lookback_n=20, initial_balance=1000000, mdd_penalty=0.1, red_line=-0.2,
                  evn_file="EvnSingleStock"):
         super(StockTradingEnv, self).__init__()
 
@@ -22,6 +22,8 @@ class StockTradingEnv(gym.Env):
         self.initial_balance = initial_balance
         self.mdd_penalty = mdd_penalty
         self.red_line = red_line
+        # self.mdd = 0
+        self.stock_inital = self.df.loc[self.lookback_n, "adj_open"]
 
         # 提取特征列名（排除日期等非数值列）
         self.features = ['adj_preclose', 'adj_open', 'adj_high',
@@ -46,8 +48,8 @@ class StockTradingEnv(gym.Env):
         pd.DataFrame(
             columns=['date', 'target_position', 'actual_position', 'adj_old_position', 'adj_open', 'adj_close',
                      'adj_preclose', 'high', 'low', 'limit_price', 'stop_price', 'tradestatuscode', 'daily_return',
-                     'current_net_worth', 'max_net_worth', 'mdd', 'total_return', 'reward', 'terminated',
-                     'truncated', ]).to_csv(
+                     'current_net_worth', 'max_net_worth', 'mdd', 'total_return', 'stock_return', 'reward',
+                     'terminated', 'truncated', ]).to_csv(
             self.env_file_name, index=False, header=True, mode="w")
 
     def reset(self, seed=None, options=None):
@@ -142,14 +144,28 @@ class StockTradingEnv(gym.Env):
         if current_net_worth > self.max_net_worth:
             self.max_net_worth = current_net_worth
 
-        mdd = (current_net_worth - self.max_net_worth) / self.max_net_worth if self.max_net_worth != 0 else 0
-
         # --- 奖励函数 ---
         # 累计收益
         total_return = (current_net_worth / self.initial_balance) - 1
 
         # 长期奖励考虑最大回撤：回撤越大，奖励衰减越快
-        reward = total_return + (mdd * self.mdd_penalty)  # 这里的系数2.0可根据对风险的厌恶程度调整
+        # reward = total_return + (adj_mdd * self.mdd_penalty)  # 这里的系数2.0可根据对风险的厌恶程度调整
+
+        # 当天操作是否正确与当前标的的涨跌幅进行比较
+        r_short = daily_return + 1 - (adj_close / pre_adj_close)
+
+        # 累计收益与当前标的的涨跌幅对比
+        stock_return = adj_close / self.stock_inital - 1
+        r_long = total_return - stock_return
+
+        # 最大回撤风险
+        mdd = (current_net_worth - self.max_net_worth) / self.max_net_worth if self.max_net_worth != 0 else 0
+        r_risk = mdd * self.mdd_penalty
+
+        # ===== 交易成本 / 换手 =====
+        r_cost = -0.1 * abs(actual_position - adj_old_position)
+
+        reward = r_short + 0.5 * r_long + r_risk + r_cost
 
         # --- 更新步数与结束判定 ---
         self.current_step += 1
@@ -177,6 +193,7 @@ class StockTradingEnv(gym.Env):
             'max_net_worth': self.max_net_worth,
             'mdd': mdd,
             'total_return': total_return,
+            'stock_return': stock_return,
             "reward": reward,
             "terminated": terminated,
             "truncated": truncated,
