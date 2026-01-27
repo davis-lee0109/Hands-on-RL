@@ -4,6 +4,7 @@ import gymnasium as gym
 import numpy as np
 import pandas as pd
 from gymnasium import spaces
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
 
 class StockTradingEnv(gym.Env):
@@ -12,7 +13,13 @@ class StockTradingEnv(gym.Env):
     """
     metadata = {'render_modes': ['human']}
 
-    def __init__(self, df, lookback_n=20, initial_balance=1000000, mdd_penalty=0.1, red_line=-0.2,
+    def __init__(self,
+                 df,
+                 lookback_n=20,
+                 initial_balance=1000000,
+                 mdd_penalty=0.1,
+                 red_line=-0.2,
+                 training=False,
                  evn_file="EvnSingleStock"):
         super(StockTradingEnv, self).__init__()
 
@@ -22,8 +29,9 @@ class StockTradingEnv(gym.Env):
         self.initial_balance = initial_balance
         self.mdd_penalty = mdd_penalty
         self.red_line = red_line
-        # self.mdd = 0
         self.stock_inital = self.df.loc[self.lookback_n, "adj_open"]
+        self.env_file_content = []
+        self.training = training
 
         # 提取特征列名（排除日期等非数值列）
         self.features = ['adj_preclose', 'adj_open', 'adj_high',
@@ -35,8 +43,8 @@ class StockTradingEnv(gym.Env):
 
         # 3. 定义观测空间：(lookback_n, 字段数量)
         # 注意：实际使用时建议对特征进行归一化，归一化在 get_observation 中处理
-        obs_dim = self.lookback_n * len(self.features) + 1
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
+        obs_dim = self.lookback_n * len(self.features) + 2
+        self.observation_space = spaces.Box(low=-1, high=np.inf, shape=(obs_dim,), dtype=np.float32)
 
         # 状态变量初始化
         self.current_step = 0
@@ -45,27 +53,28 @@ class StockTradingEnv(gym.Env):
         self.max_net_worth = initial_balance
 
         self.env_file_name = f"./env_log/{evn_file}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        pd.DataFrame(
-            columns=['date', 'target_position', 'actual_position', 'adj_old_position', 'adj_open', 'adj_close',
-                     'adj_preclose', 'high', 'low', 'limit_price', 'stop_price', 'tradestatuscode', 'daily_return',
-                     'current_net_worth', 'max_net_worth', 'mdd', 'total_return', 'stock_return', 'reward',
-                     'terminated', 'truncated', ]).to_csv(
-            self.env_file_name, index=False, header=True, mode="w")
+        print(self.env_file_name)
 
     def reset(self, seed=None, options=None):
         # 按照 Gymnasium 标准处理 seed
         super().reset(seed=seed)
 
-        self.current_step = self.lookback_n
+        if self.training:
+            self.current_step = np.random.randint(
+                self.lookback_n, len(self.df) - 1
+            )
+        else:
+            self.current_step = self.lookback_n
+
         self.position = 0.0
         self.net_worths = [self.initial_balance]
         self.max_net_worth = self.initial_balance
 
-        observation = self._get_observation()
+        observation = self._get_observation(mdd=0)
         info = {}
         return observation, info
 
-    def _get_observation(self):
+    def _get_observation(self, mdd):
         # 截取当前时刻前 lookback_n 天的数据特征
         obs = self.df.loc[self.current_step - self.lookback_n: self.current_step - 1, self.features].reset_index(
             drop=True)
@@ -75,11 +84,14 @@ class StockTradingEnv(gym.Env):
             obs[col_i] = obs[col_i].values / adj_preclose_value
 
         for col_i in ['pctchange', 'adj_volumne', 'amount']:
-            obs[col_i] = (max(obs[col_i]) - obs[col_i]) / (max(obs[col_i]) - min(obs[col_i]))
+            # obs[col_i] = (max(obs[col_i]) - obs[col_i]) / (max(obs[col_i]) - min(obs[col_i]))
+            obs[col_i] = MinMaxScaler().fit_transform(StandardScaler().fit_transform(obs[[col_i]])).flatten()
+
+        obs["tradestatuscode"] = np.abs(obs["tradestatuscode"].values) / 7
 
         obs = obs.values.flatten()
 
-        result = np.concatenate([obs, np.array([self.position])])
+        result = np.concatenate([obs, np.array([self.position, mdd])])
 
         return result.astype(np.float32)
 
@@ -109,14 +121,14 @@ class StockTradingEnv(gym.Env):
         old_position = self.position
 
         # 如果没有涨跌停，则允许调仓
-        if tradestatuscode == 0:
+        if tradestatuscode == 0:  # 停牌
             actual_position = old_position
-        elif target_position > old_position:
+        elif target_position > old_position:  # 涨停
             if is_limit_up:
                 actual_position = old_position
             else:
                 actual_position = target_position
-        elif target_position < old_position:
+        elif target_position < old_position:  # 跌停
             if is_limit_down:
                 actual_position = old_position
             else:
@@ -156,14 +168,15 @@ class StockTradingEnv(gym.Env):
 
         # 累计收益与当前标的的涨跌幅对比
         stock_return = adj_close / self.stock_inital - 1
-        r_long = total_return - stock_return
+        long_return = adj_close / self.df.iloc[self.current_step - self.lookback_n]['adj_close']
+        r_long = total_return - long_return
 
         # 最大回撤风险
         mdd = (current_net_worth - self.max_net_worth) / self.max_net_worth if self.max_net_worth != 0 else 0
         r_risk = mdd * self.mdd_penalty
 
         # ===== 交易成本 / 换手 =====
-        r_cost = -0.1 * abs(actual_position - adj_old_position)
+        r_cost = -0.0001 * abs(actual_position - adj_old_position)
 
         reward = r_short + 0.5 * r_long + r_risk + r_cost
 
@@ -174,9 +187,9 @@ class StockTradingEnv(gym.Env):
         # truncated: 异常中断（此处暂无）
         truncated = self.current_step >= len(self.df) - 1
 
-        observation = self._get_observation()
+        observation = self._get_observation(mdd)
         info = {
-            "date": [row['trade_date']],
+            "date": row['trade_date'],
             "target_position": target_position,
             "actual_position": actual_position,
             'adj_old_position': adj_old_position,
@@ -198,10 +211,16 @@ class StockTradingEnv(gym.Env):
             "terminated": terminated,
             "truncated": truncated,
         }
-        pd.DataFrame(info).to_csv(self.env_file_name, index=False, header=False, mode="a")
+        self.env_file_content.append(info)
 
         return observation, reward, terminated, truncated, info
 
-    def render(self):
+    def render(self, show=False):
         # 可视化净值或打印
-        print(f"Step: {self.current_step}, Net Worth: {self.net_worths[-1]:.2f}, Position: {self.position:.2f}")
+        log_pd = pd.DataFrame(self.env_file_content)
+        log_pd.to_csv(self.env_file_name, index=False, header=True, mode="w")
+        if show:
+            print(f"Step: {self.current_step}, Net Worth: {self.net_worths[-1]:.2f}, Position: {self.position:.2f}")
+            print(log_pd.tail(1).T)
+            log_pd[["total_return","stock_return"]].plot()
+            log_pd[["actual_position","target_position"]].plot()
